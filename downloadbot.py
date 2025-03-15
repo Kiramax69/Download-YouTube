@@ -10,7 +10,7 @@ TOKEN = "7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU"
 
 # Настройка бота
 bot = Bot(token=TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot)  # Передаем bot в Dispatcher
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
