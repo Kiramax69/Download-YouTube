@@ -12,7 +12,7 @@ TOKEN = "7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU"
 # Настройка бота
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()  # Используем память для хранения состояний
-dp = Dispatcher(bot, storage=storage)  # Передаем bot в Dispatcher через параметр storage
+dp = Dispatcher()  # Просто создаем Dispatcher без передачи bot в конструктор
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +107,7 @@ async def delete_file_after_delay(file_path, delay=600):
 
 async def main():
     """Запуск бота"""
-    await dp.start_polling()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
