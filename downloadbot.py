@@ -3,111 +3,157 @@ import os
 import yt_dlp
 import asyncio
 from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
 
-# Токен Telegram-бота
+# Конфигурация
 TOKEN = "7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU"
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 МБ для обычных пользователей Telegram
+TEMP_DIR = "temp_downloads"
 
-# Настройка бота
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Инициализация бота
 bot = Bot(token=TOKEN)
-storage = MemoryStorage()  # Используем память для хранения состояний
-dp = Dispatcher()  # Просто создаем Dispatcher без передачи bot в конструктор
+dp = Dispatcher(bot)
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
+# Создаем временную папку если не существует
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
 
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    await message.answer("Привет! Отправь мне ссылку на видео с YouTube, и я помогу тебе скачать его.")
+async def on_startup(_):
+    logger.info("Бот успешно запущен!")
 
-@dp.message_handler(content_types=types.ContentType.TEXT)
-async def process_video_link(message: types.Message):
+@dp.message(commands=['start', 'help'])
+async def start_command(message: types.Message):
+    """Обработчик команды /start"""
+    welcome_text = (
+        "Привет! Я бот для скачивания видео с YouTube.\n"
+        "Просто отправь мне ссылку на видео, и я предложу варианты загрузки.\n"
+        "Ограничения: видео до 50 МБ (Telegram лимит)"
+    )
+    await message.answer(welcome_text)
+
+@dp.message(content_types=['text'])
+async def process_link(message: types.Message):
+    """Обработка ссылок на видео"""
     url = message.text.strip()
-
-    ydl_opts = {"quiet": True}
+    
     try:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestvideo+bestaudio/best",
+        }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get("formats", [])
+            title = info.get("title", "Video")
 
         keyboard = InlineKeyboardMarkup(row_width=2)
         quality_options = {}
 
         for f in formats:
-            if f.get("vcodec") != "none" and f.get("acodec") != "none":  # Только видео с аудио
+            if f.get("vcodec") != "none" and f.get("acodec") != "none":
                 res = f.get("format_note", "Unknown")
-                file_size = f.get("filesize", 0) or f.get("filesize_approx", 0)  # Получаем размер файла
+                file_size = f.get("filesize") or f.get("filesize_approx") or 0
+                
+                if file_size and file_size <= MAX_FILE_SIZE:
+                    quality_options[res] = f["format_id"]
 
-                if file_size > 2 * 1024 * 1024 * 1024:  # Больше 2ГБ?
-                    continue  # Пропускаем этот вариант
-
-                quality_options[res] = f["format_id"]
+        if not quality_options:
+            await message.answer(
+                "Видео слишком большое (>50МБ) или нет подходящих форматов.\n"
+                "Попробуйте другое видео."
+            )
+            return
 
         for res, format_id in quality_options.items():
-            keyboard.insert(InlineKeyboardButton(text=res, callback_data=f"download|{url}|{format_id}"))
+            button = InlineKeyboardButton(
+                text=f"{res}",
+                callback_data=f"video|{url}|{format_id}"
+            )
+            keyboard.insert(button)
 
-        # Кнопка для скачивания только аудио
-        keyboard.insert(InlineKeyboardButton(text="🎵 Скачать аудио (MP3)", callback_data=f"download_audio|{url}"))
+        audio_button = InlineKeyboardButton(
+            text="🎵 Только аудио (MP3)",
+            callback_data=f"audio|{url}"
+        )
+        keyboard.add(audio_button)
 
-        if quality_options:
-            await message.answer("Выберите качество видео:", reply_markup=keyboard)
-        else:
-            await message.answer("Видео слишком большое (>2ГБ) или недоступно для скачивания.")
+        await message.answer(
+            f"Видео: {title}\nВыберите качество:",
+            reply_markup=keyboard
+        )
 
     except Exception as e:
-        await message.answer("Ошибка обработки видео. Возможно, оно приватное или недоступно.")
-        logging.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка обработки ссылки: {e}")
+        await message.answer("Ошибка: неверная ссылка или видео недоступно")
 
-@dp.callback_query(lambda c: c.data.startswith("download") or c.data.startswith("download_audio"))
-async def download_video(callback_query: types.CallbackQuery):
-    data = callback_query.data.split("|")
-    is_audio = data[0] == "download_audio"
-    url = data[1]
-    format_id = data[2] if not is_audio else "bestaudio"
-
-    user_id = callback_query.from_user.id
-    filename = f"{user_id}.{'mp4' if not is_audio else 'mp3'}"
+@dp.callback_query(lambda c: c.data.startswith(("video|", "audio|")))
+async def process_download(callback: types.CallbackQuery):
+    """Обработка скачивания видео или аудио"""
+    await bot.answer_callback_query(callback.id)
+    
+    data = callback.data.split("|")
+    download_type, url = data[0], data[1]
+    format_id = data[2] if download_type == "video" else "bestaudio"
+    
+    user_id = callback.from_user.id
+    file_ext = "mp3" if download_type == "audio" else "mp4"
+    filename = os.path.join(TEMP_DIR, f"{user_id}_{format_id}.{file_ext}")
 
     ydl_opts = {
         "outtmpl": filename,
         "quiet": True,
         "format": format_id,
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}] if is_audio else [],
+        "merge_output_format": "mp4",
     }
+    
+    if download_type == "audio":
+        ydl_opts.update({
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+        })
 
-    progress_msg = await bot.send_message(user_id, "⏳ Скачивание видео...")
+    progress_msg = await bot.send_message(user_id, "⏳ Скачивание началось...")
 
     try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
-        await progress_msg.edit_text("✅ Отправка видео...")
+        file_size = os.path.getsize(filename)
+        if file_size > MAX_FILE_SIZE:
+            await progress_msg.edit_text("❌ Файл слишком большой для отправки")
+            os.remove(filename)
+            return
 
+        await progress_msg.edit_text("✅ Загрузка файла в Telegram...")
+        
         with open(filename, "rb") as file:
-            if is_audio:
-                await bot.send_audio(user_id, file, title="Аудио из YouTube")
+            if download_type == "audio":
+                await bot.send_audio(user_id, file)
             else:
                 await bot.send_video(user_id, file)
 
         await progress_msg.delete()
 
-        # Удаляем файл через 10 минут
-        asyncio.create_task(delete_file_after_delay(filename, delay=600))
-
     except Exception as e:
-        await progress_msg.edit_text("❌ Ошибка при скачивании видео.")
-        logging.error(f"Ошибка загрузки видео: {e}")
+        logger.error(f"Ошибка скачивания: {e}")
+        await progress_msg.edit_text("❌ Ошибка при скачивании")
 
-async def delete_file_after_delay(file_path, delay=600):
-    """Удаляет файл через заданное время (по умолчанию 10 минут)."""
-    await asyncio.sleep(delay)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
-async def main():
-    """Запуск бота"""
-    await dp.start_polling(bot)
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
