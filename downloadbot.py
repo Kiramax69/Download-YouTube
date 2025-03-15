@@ -4,14 +4,13 @@ import yt_dlp
 import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
 
 # Токен Telegram-бота
 TOKEN = "7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU"
 
 # Настройка бота
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +33,7 @@ async def process_video_link(message: types.Message):
         quality_options = {}
 
         for f in formats:
-            if f.get("vcodec") != "none" and f.get("acodec") != "none":  # Видео с аудио
+            if f.get("vcodec") != "none" and f.get("acodec") != "none":  # Только видео с аудио
                 res = f.get("format_note", "Unknown")
                 file_size = f.get("filesize", 0) or f.get("filesize_approx", 0)  # Получаем размер файла
 
@@ -46,7 +45,7 @@ async def process_video_link(message: types.Message):
         for res, format_id in quality_options.items():
             keyboard.insert(InlineKeyboardButton(text=res, callback_data=f"download|{url}|{format_id}"))
 
-        # Добавляем кнопку для скачивания только аудио
+        # Кнопка для скачивания только аудио
         keyboard.insert(InlineKeyboardButton(text="🎵 Скачать аудио (MP3)", callback_data=f"download_audio|{url}"))
 
         if quality_options:
@@ -58,7 +57,7 @@ async def process_video_link(message: types.Message):
         await message.answer("Ошибка обработки видео. Возможно, оно приватное или недоступно.")
         logging.error(f"Ошибка: {e}")
 
-@dp.callback_query_handler(lambda c: c.data.startswith("download") or c.data.startswith("download_audio"))
+@dp.callback_query(lambda c: c.data.startswith("download") or c.data.startswith("download_audio"))
 async def download_video(callback_query: types.CallbackQuery):
     data = callback_query.data.split("|")
     is_audio = data[0] == "download_audio"
@@ -104,6 +103,9 @@ async def delete_file_after_delay(file_path, delay=600):
     if os.path.exists(file_path):
         os.remove(file_path)
 
-# Запуск бота
+async def main():
+    """Запуск бота"""
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
