@@ -1,159 +1,176 @@
-import logging
-import os
-import yt_dlp
 import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import filters
+import yt_dlp
+from hurry.filesize import size
 
-# Конфигурация
-TOKEN = "7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU"
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 МБ для обычных пользователей Telegram
-TEMP_DIR = "temp_downloads"
+TOKEN = '7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU'  # Замените на токен вашего бота
+COOKIES_FILE = 'youtube_cookies.txt'  # Путь к файлу с cookies
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Базовые настройки yt-dlp
+ydl_opts_base = {
+    'merge_output_format': 'mp4',
+    'outtmpl': 'downloads/%(title)s.%(ext)s',
+    'cookiefile': COOKIES_FILE,
+}
 
-# Инициализация бота
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
 
-# Создаем временную папку если не существует
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
-
-async def on_startup(_):
-    logger.info("Бот успешно запущен!")
-
-@dp.message(commands=['start', 'help'])
-async def start_command(message: types.Message):
-    """Обработчик команды /start"""
-    welcome_text = (
-        "Привет! Я бот для скачивания видео с YouTube.\n"
-        "Просто отправь мне ссылку на видео, и я предложу варианты загрузки.\n"
-        "Ограничения: видео до 50 МБ (Telegram лимит)"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        'Привет! Отправь мне ссылку на YouTube видео (будет выбрано качество 1080p или выше).'
     )
-    await message.answer(welcome_text)
 
-@dp.message(content_types=['text'])
-async def process_link(message: types.Message):
-    """Обработка ссылок на видео"""
-    url = message.text.strip()
-    
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    url = update.message.text
+
+    if 'youtube.com' not in url and 'youtu.be' not in url:
+        await update.message.reply_text('Пожалуйста, отправь ссылку на YouTube видео.')
+        return
+
     try:
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "format": "bestvideo+bestaudio/best",
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get("formats", [])
-            title = info.get("title", "Video")
+        # Получаем информацию о видео
+        with yt_dlp.YoutubeDL({
+            'quiet': True,
+            'cookiefile': COOKIES_FILE,
+            'listformats': True  # Включаем вывод всех форматов для отладки
+        }) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
 
-        keyboard = InlineKeyboardMarkup(row_width=2)
-        quality_options = {}
+        title = info.get('title', 'N/A')
+        duration = info.get('duration', 0)
+        duration_str = f"{duration // 60:02d}:{duration % 60:02d}"
+        views = info.get('view_count', 'N/A')
+        uploader = info.get('uploader', 'N/A')
 
+        formats = info.get('formats', [])
+        quality_options = []
+        has_ready_1080p = False
+
+        # Отладочная информация: выводим все доступные форматы
+        print("Доступные форматы:")
         for f in formats:
-            if f.get("vcodec") != "none" and f.get("acodec") != "none":
-                res = f.get("format_note", "Unknown")
-                file_size = f.get("filesize") or f.get("filesize_approx") or 0
-                
-                if file_size and file_size <= MAX_FILE_SIZE:
-                    quality_options[res] = f["format_id"]
+            print(f"Format ID: {f.get('format_id')}, Height: {f.get('height')}, Resolution: {f.get('resolution')}, "
+                  f"vcodec: {f.get('vcodec')}, acodec: {f.get('acodec')}, fps: {f.get('fps')}")
+
+        # Ищем готовые форматы с разрешением 1080p или выше (видео + аудио)
+        for f in formats:
+            height = f.get('height')
+            vcodec = f.get('vcodec')
+            acodec = f.get('acodec')
+            if height and height >= 1080 and vcodec and vcodec != 'none' and acodec and acodec != 'none':
+                resolution = f.get('resolution', 'unknown')
+                fps = f.get('fps', 'N/A')
+                filesize = f.get('filesize', 0) or f.get('filesize_approx', 0)
+                format_id = f.get('format_id')
+                quality_options.append({
+                    'text': f"{resolution} {fps}fps (Готовое, {size(filesize) if filesize else 'N/A'})",
+                    'format_id': format_id,
+                    'filesize': filesize
+                })
+                has_ready_1080p = True
+
+        # Если нет готовых форматов, ищем лучшие видео для объединения с аудио
+        if not has_ready_1080p:
+            for f in formats:
+                height = f.get('height')
+                vcodec = f.get('vcodec')
+                if height and height >= 1080 and vcodec and vcodec != 'none':
+                    resolution = f.get('resolution', 'unknown')
+                    fps = f.get('fps', 'N/A')
+                    filesize = f.get('filesize', 0) or f.get('filesize_approx', 0)
+                    format_id = f.get('format_id')
+                    quality_options.append({
+                        'text': f"{resolution} {fps}fps (Объединенное, {size(filesize) if filesize else 'N/A'})",
+                        'format_id': format_id,
+                        'filesize': filesize,
+                        'is_combined': True
+                    })
 
         if not quality_options:
-            await message.answer(
-                "Видео слишком большое (>50МБ) или нет подходящих форматов.\n"
-                "Попробуйте другое видео."
+            await update.message.reply_text(
+                "Видео в разрешении 1080p или выше с аудио недоступно. Попробуйте другое видео."
             )
             return
 
-        for res, format_id in quality_options.items():
-            button = InlineKeyboardButton(
-                text=f"{res}",
-                callback_data=f"video|{url}|{format_id}"
-            )
-            keyboard.insert(button)
+        # Ограничиваем callback_data
+        keyboard = [
+            [InlineKeyboardButton(q['text'], callback_data=f"{format_id}|{url}|{q.get('is_combined', False)}")]
+            for q in quality_options[-5:]  # Показываем до 5 вариантов
+        ]
 
-        audio_button = InlineKeyboardButton(
-            text="🎵 Только аудио (MP3)",
-            callback_data=f"audio|{url}"
+        video_info = (
+            f"Название: {title}\n"
+            f"Длительность: {duration_str}\n"
+            f"Просмотров: {views:,}\n"
+            f"Автор: {uploader}\n\n"
+            "Выберите качество (1080p или выше):"
         )
-        keyboard.add(audio_button)
 
-        await message.answer(
-            f"Видео: {title}\nВыберите качество:",
-            reply_markup=keyboard
-        )
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(video_info, reply_markup=reply_markup)
 
     except Exception as e:
-        logger.error(f"Ошибка обработки ссылки: {e}")
-        await message.answer("Ошибка: неверная ссылка или видео недоступно")
+        await update.message.reply_text(f'Ошибка: {str(e)}')
 
-@dp.callback_query(lambda c: c.data.startswith(("video|", "audio|")))
-async def process_download(callback: types.CallbackQuery):
-    """Обработка скачивания видео или аудио"""
-    await bot.answer_callback_query(callback.id)
-    
-    data = callback.data.split("|")
-    download_type, url = data[0], data[1]
-    format_id = data[2] if download_type == "video" else "bestaudio"
-    
-    user_id = callback.from_user.id
-    file_ext = "mp3" if download_type == "audio" else "mp4"
-    filename = os.path.join(TEMP_DIR, f"{user_id}_{format_id}.{file_ext}")
 
-    ydl_opts = {
-        "outtmpl": filename,
-        "quiet": True,
-        "format": format_id,
-        "merge_output_format": "mp4",
-    }
-    
-    if download_type == "audio":
-        ydl_opts.update({
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }]
-        })
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
 
-    progress_msg = await bot.send_message(user_id, "⏳ Скачивание началось...")
+    format_id, url, is_combined = query.data.split('|')
+    is_combined = bool(is_combined == 'True')
+
+    await query.edit_message_text("Начинаю скачивание...")
 
     try:
+        ydl_opts = ydl_opts_base.copy()
+        if is_combined:
+            ydl_opts['format'] = f"{format_id}+bestaudio/best"  # Объединяем видео и аудио
+        else:
+            ydl_opts['format'] = format_id  # Используем готовый формат
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+            filename = ydl.prepare_filename(info)
 
-        file_size = os.path.getsize(filename)
-        if file_size > MAX_FILE_SIZE:
-            await progress_msg.edit_text("❌ Файл слишком большой для отправки")
-            os.remove(filename)
-            return
+        actual_size = os.path.getsize(filename)
+        if actual_size > 50 * 1024 * 1024:  # Telegram ограничивает файлы до 50 МБ
+            download_url = info.get('url', url)
+            await query.message.reply_text(
+                f"Видео слишком большое ({size(actual_size)}). Вот ссылка для скачивания:\n{download_url}"
+            )
+        else:
+            with open(filename, 'rb') as video:
+                await query.message.reply_video(
+                    video=video,
+                    supports_streaming=True
+                )
 
-        await progress_msg.edit_text("✅ Загрузка файла в Telegram...")
-        
-        with open(filename, "rb") as file:
-            if download_type == "audio":
-                await bot.send_audio(user_id, file)
-            else:
-                await bot.send_video(user_id, file)
-
-        await progress_msg.delete()
+        os.remove(filename)
+        await query.message.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка скачивания: {e}")
-        await progress_msg.edit_text("❌ Ошибка при скачивании")
+        await query.edit_message_text(f'Ошибка: {str(e)}')
 
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
+
+def main() -> None:
+    if not os.path.exists(COOKIES_FILE):
+        print(f"Файл {COOKIES_FILE} не найден. Проверьте его наличие.")
+        return
+
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button))
+
+    if not os.path.exists('downloads'):
+        os.makedirs('downloads')
+
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    main()
