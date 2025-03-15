@@ -4,13 +4,15 @@ import yt_dlp
 import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # Токен Telegram-бота
 TOKEN = "7787818513:AAEZwJ-6tl1B7NN_GdgL0P1GqXWiqVKLEBU"
 
 # Настройка бота
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)  # Передаем bot в Dispatcher
+storage = MemoryStorage()  # Используем память для хранения состояний
+dp = Dispatcher(bot, storage=storage)  # Передаем bot в Dispatcher через параметр storage
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -105,7 +107,7 @@ async def delete_file_after_delay(file_path, delay=600):
 
 async def main():
     """Запуск бота"""
-    await dp.start_polling(bot)
+    await dp.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
